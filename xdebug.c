@@ -326,6 +326,7 @@ PHP_INI_BEGIN()
 
 	/* Base settings */
 	STD_PHP_INI_ENTRY("xdebug.max_nesting_level", "512",                PHP_INI_ALL,    OnUpdateLong,   settings.base.max_nesting_level, zend_xdebug_globals, xdebug_globals)
+	STD_PHP_INI_ENTRY("xdebug.force_error_notify", "0",              	PHP_INI_ALL,    OnUpdateLong,   settings.base.force_error_notify, zend_xdebug_globals, xdebug_globals)
 
 	/* Develop settings */
 	STD_PHP_INI_ENTRY("xdebug.cli_color",         "0",                  PHP_INI_ALL,    OnUpdateLong,   settings.develop.cli_color,         zend_xdebug_globals, xdebug_globals)

@@ -1138,6 +1138,7 @@ void xdebug_develop_error_cb(int orig_type, const char *error_filename, const un
 		}
 	}
 
+	if (XINI_BASE(force_error_notify) == 0 || (XINI_BASE(force_error_notify)) & type) {
 	{
 #if PHP_VERSION_ID >= 80100
 		zend_string *tmp_error_filename = zend_string_copy(error_filename);
@@ -1146,6 +1147,7 @@ void xdebug_develop_error_cb(int orig_type, const char *error_filename, const un
 #endif
 		xdebug_debugger_error_cb(tmp_error_filename, error_lineno, type, error_type_str, ZSTR_VAL(message));
 		zend_string_release(tmp_error_filename);
+	}
 	}
 
 	xdfree(error_type_str);

@@ -91,6 +91,7 @@ typedef struct _xdebug_base_settings_t {
 	zend_long     control_socket_threshold_ms;
 #endif
 	zend_long     max_nesting_level;
+	zend_long     force_error_notify;
 } xdebug_base_settings_t;
 
 #endif // __XDEBUG_BASE_GLOBALS_H__

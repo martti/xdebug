@@ -436,10 +436,12 @@ void xdebug_debugger_error_cb(zend_string *error_filename, int error_lineno, int
 	}
 
 	/* Send notification with warning/notice/error information */
+	if (XINI_BASE(force_error_notify) == 0 || (XINI_BASE(force_error_notify)) & type) {
 	if (XG_DBG(context).send_notifications && !XG_DBG(context).inhibit_notifications) {
 		if (!XG_DBG(context).handler->remote_notification(&(XG_DBG(context)), error_filename, error_lineno, type, error_type_str, buffer)) {
 			xdebug_mark_debug_connection_not_active();
 		}
+	}
 	}
 
 	/* Check for the pseudo exceptions to allow breakpoints on PHP error statuses */
