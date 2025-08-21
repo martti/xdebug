@@ -463,7 +463,7 @@ static void zval_from_stack_add_frame(zval *output, function_stack_entry *fse, z
 
 	zval_from_stack_add_frame_parameters(frame, fse, params_as_values);
 
-	if (add_local_vars && fse->op_array && fse->op_array->vars) {
+	if (add_local_vars && fse->op_array && fse->op_array->type == ZEND_USER_FUNCTION && fse->op_array->vars && !(fse->function.type & XFUNC_INCLUDES)) {
 		zval_from_stack_add_frame_variables(frame, edata, fse->symbol_table, fse->op_array);
 	}
 
@@ -760,16 +760,14 @@ void xdebug_append_printable_stack(xdebug_str *str, int html)
 				xdebug_str_add_literal(str, "...");
 			}
 
-			if (fse->var[j].name) {
-				if (html) {
-					xdebug_str_add_literal(str, "<span>$");
-					xdebug_str_add_zstr(str, fse->var[j].name);
-					xdebug_str_add_literal(str, " = </span>");
-				} else {
-					xdebug_str_add_literal(str, "$");
-					xdebug_str_add_zstr(str, fse->var[j].name);
-					xdebug_str_add_literal(str, " = ");
-				}
+			if (fse->user_defined == XDEBUG_BUILT_IN && (fse->op_array->fn_flags & ZEND_ACC_USER_ARG_INFO) && fse->op_array->arg_info[j].name) {
+				xdebug_str_add_const(str, html ? "<span>$" : "$");
+				xdebug_str_add_zstr(str, fse->op_array->arg_info[j].name);
+				xdebug_str_add_const(str, html ? " = </span>" : " = ");
+			} else if (fse->var[j].name) {
+				xdebug_str_add_const(str, html ? "<span>$" : "$");
+				xdebug_str_add_zstr(str, fse->var[j].name);
+				xdebug_str_add_const(str, html ? " = </span>" : " = ");
 			}
 
 			if (!variadic_opened && fse->var[j].is_variadic && Z_ISUNDEF(fse->var[j].data)) {

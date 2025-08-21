@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | Xdebug                                                               |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2002-2023 Derick Rethans                               |
+   | Copyright (c) 2002-2025 Derick Rethans                               |
    +----------------------------------------------------------------------+
    | This source file is subject to version 1.01 of the Xdebug license,   |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -1146,6 +1146,10 @@ DBGP_FUNC(eval)
 	/* base64 decode eval string */
 	eval_string = (char*) xdebug_base64_decode((unsigned char*) CMD_OPTION_CHAR('-'), CMD_OPTION_LEN('-'), &new_length);
 
+	if (!eval_string) {
+		RETURN_RESULT_WITH_MESSAGE(XG_DBG(status), XG_DBG(reason), XDEBUG_ERROR_EVALUATING_CODE, xdebug_sprintf("%s: %s", error_message_from_code(XDEBUG_ERROR_EVALUATING_CODE), "invalid base64-encoded data value"));
+	}
+
 	res = xdebug_do_eval(eval_string, &ret_zval, &return_message);
 
 	xdfree(eval_string);
@@ -1273,9 +1277,25 @@ DBGP_FUNC(detach)
 	XG_DBG(stdout_mode) = 0;
 	XG_DBG(detached) = 1;
 
-	if (CMD_OPTION_SET('-')) {
-		XG_DBG(context).detached_message = xdstrdup(CMD_OPTION_CHAR('-'));
-		xdebug_log_ex(XLOG_CHAN_DEBUG, XLOG_WARN, "DETACH", "Debug client detached: %s.", XG_DBG(context).detached_message);
+	if (CMD_OPTION_SET('-') && CMD_OPTION_LEN('-') > 0) {
+		unsigned char *new_value;
+		size_t         new_length = 0;
+
+		/* It should be base64 */
+		new_value = xdebug_base64_decode((unsigned char*) CMD_OPTION_CHAR('-'), CMD_OPTION_LEN('-'), &new_length);
+
+		/* But if not, we fall back if all characters are also printable. */
+		if (new_value) {
+			if (xdebug_is_printable((char*) new_value, new_length)) {
+				XG_DBG(context).detached_message = (char*) new_value;
+			} else {
+				xdfree(new_value);
+				XG_DBG(context).detached_message = xdstrdup(CMD_OPTION_CHAR('-'));
+			}
+		} else {
+			XG_DBG(context).detached_message = xdstrdup(CMD_OPTION_CHAR('-'));
+		}
+		xdebug_log_ex(XLOG_CHAN_DEBUG, XLOG_WARN, "DETACH", "Debug client detached: %s", XG_DBG(context).detached_message);
 	}
 }
 
@@ -1430,6 +1450,11 @@ DBGP_FUNC(feature_get)
 			xdebug_xml_add_attribute(*retval, "supported", "1");
 		XDEBUG_STR_CASE_END
 
+		XDEBUG_STR_CASE("virtual_exception_value")
+			xdebug_xml_add_text(*retval, xdebug_sprintf("%ld", XG_DBG(context).virtual_exception_value));
+			xdebug_xml_add_attribute(*retval, "supported", "1");
+		XDEBUG_STR_CASE_END
+
 		XDEBUG_STR_CASE_DEFAULT
 			xdebug_xml_add_text(*retval, xdstrdup(lookup_cmd(CMD_OPTION_CHAR('n')) ? "1" : "0"));
 			xdebug_xml_add_attribute(*retval, "supported", lookup_cmd(CMD_OPTION_CHAR('n')) ? "1" : "0");
@@ -1503,6 +1528,10 @@ DBGP_FUNC(feature_set)
 
 		XDEBUG_STR_CASE("breakpoint_include_return_value")
 			XG_DBG(context).breakpoint_include_return_value = strtol(CMD_OPTION_CHAR('v'), NULL, 10);
+		XDEBUG_STR_CASE_END
+
+		XDEBUG_STR_CASE("virtual_exception_value")
+			XG_DBG(context).virtual_exception_value = strtol(CMD_OPTION_CHAR('v'), NULL, 10);
 		XDEBUG_STR_CASE_END
 
 		XDEBUG_STR_CASE_DEFAULT
@@ -1714,6 +1743,10 @@ DBGP_FUNC(property_set)
 	}
 
 	new_value = xdebug_base64_decode((unsigned char*) CMD_OPTION_CHAR('-'), CMD_OPTION_LEN('-'), &new_length);
+
+	if (!new_value) {
+		RETURN_RESULT_WITH_MESSAGE(XG_DBG(status), XG_DBG(reason), XDEBUG_ERROR_EVALUATING_CODE, xdebug_sprintf("%s: %s", error_message_from_code(XDEBUG_ERROR_EVALUATING_CODE), "invalid base64-encoded data value"));
+	}
 
 	/* Set a cast, if requested through the 't' option */
 	cast_as = "";
@@ -1959,6 +1992,21 @@ static int attach_context_vars(xdebug_xml_node *node, xdebug_var_export_options 
 		xdebug_str_free(name);
 
 		return 0;
+	}
+
+	/* Add special exception value if enabled, if it exists in engine global and if depth = 0 */
+	if (XG_DBG(context).virtual_exception_value && EG(exception) && depth == 0) {
+		xdebug_xml_node *tmp_node;
+		xdebug_str *name = xdebug_str_create_from_const_char("$"XDEBUG_EXCEPTION_VALUE_VAR_NAME);
+		zval val;
+
+		ZVAL_OBJ(&val, EG(exception));
+
+		tmp_node = xdebug_get_zval_value_xml_node(name, &val, options);
+		xdebug_xml_expand_attribute_value(tmp_node, "facet", "readonly virtual");
+
+		xdebug_xml_add_child(node, tmp_node);
+		xdebug_str_free(name);
 	}
 
 	/* Here the context_id is 0 */
@@ -2307,6 +2355,7 @@ static int xdebug_dbgp_cmdloop(xdebug_con *context, int bail)
 
 		option = xdebug_fd_read_line_delim(context->socket, context->buffer, FD_RL_SOCKET, '\0', &length);
 		if (!option) {
+			xdebug_mark_debug_connection_not_active();
 			return 0;
 		}
 
@@ -2439,6 +2488,7 @@ int xdebug_dbgp_init(xdebug_con *context, int mode)
 	context->resolved_breakpoints = 0;
 	context->breakpoint_details = 0;
 	context->breakpoint_include_return_value = 0;
+	context->virtual_exception_value = 0;
 
 	xdebug_mark_debug_connection_active();
 	xdebug_dbgp_cmdloop(context, XDEBUG_CMDLOOP_BAIL);
@@ -2594,7 +2644,7 @@ int xdebug_dbgp_break_on_line(xdebug_con *context, xdebug_brk_info *brk, zend_st
 		return 0;
 	}
 
-	if (zend_string_equals(brk->filename, resolved_filename)) {
+	if (zend_string_equals_ci(brk->filename, resolved_filename)) {
 		xdebug_log(XLOG_CHAN_DEBUG, XLOG_DEBUG, "F: File names match (%s).", ZSTR_VAL(brk->filename));
 
 		if (free_eval_filename) {
@@ -2982,8 +3032,8 @@ int xdebug_dbgp_user_notify(xdebug_con *context, zend_string *filename, long lin
 	xdebug_xml_add_attribute(response, "xmlns:xdebug", "https://xdebug.org/dbgp/xdebug");
 	xdebug_xml_add_attribute(response, "name", "user");
 
-	options = (xdebug_var_export_options*) context->options;
-	options->encode_as_extended_property = 0;
+	options = xdebug_var_export_options_from_ini();
+	options->extended_properties = 1;
 
 	location_node = xdebug_xml_node_init("xdebug:location");
 	if (filename) {
@@ -3007,6 +3057,8 @@ int xdebug_dbgp_user_notify(xdebug_con *context, zend_string *filename, long lin
 
 	send_message(context, response);
 	xdebug_xml_node_dtor(response);
+	xdfree(options->runtime);
+	xdfree(options);
 
 	return 1;
 }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | Xdebug                                                               |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2002-2024 Derick Rethans                               |
+   | Copyright (c) 2002-2025 Derick Rethans                               |
    +----------------------------------------------------------------------+
    | This source file is subject to version 1.01 of the Xdebug license,   |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -70,7 +70,7 @@ static void xdebug_error_cb(int orig_type, const char *error_filename, const uin
 /* execution redirection functions */
 zend_op_array* (*old_compile_file)(zend_file_handle* file_handle, int type);
 static void (*xdebug_old_execute_ex)(zend_execute_data *execute_data);
-static void (*xdebug_old_execute_internal)(zend_execute_data *current_execute_data, zval *return_value);
+static void (*xdebug_old_execute_internal)(zend_execute_data *execute_data, zval *return_value);
 
 /* error_cb and execption hook overrides */
 void xdebug_base_use_original_error_cb(void);
@@ -616,15 +616,13 @@ function_stack_entry *xdebug_add_stack_frame(zend_execute_data *zdata, zend_op_a
 	zend_op              *cur_opcode;
 
 	if (type == XDEBUG_USER_DEFINED) {
-		edata = EG(current_execute_data)->prev_execute_data;
-		if (edata) {
-			opline_ptr = (zend_op**) &edata->opline;
-		}
+		edata = zdata->prev_execute_data;
 	} else {
-		edata = EG(current_execute_data);
-		opline_ptr = (zend_op**) &EG(current_execute_data)->opline;
+		edata = zdata;
 	}
-	zdata = EG(current_execute_data);
+	if (edata) {
+		opline_ptr = (zend_op**) &edata->opline;
+	}
 
 	tmp = (function_stack_entry*) xdebug_vector_push(XG_BASE(stack));
 	tmp->level         = XDEBUG_VECTOR_COUNT(XG_BASE(stack));
@@ -722,7 +720,6 @@ function_stack_entry *xdebug_add_stack_frame(zend_execute_data *zdata, zend_op_a
 static void xdebug_execute_user_code_begin(zend_execute_data *execute_data)
 {
 	zend_op_array     *op_array = &(execute_data->func->op_array);
-	zend_execute_data *edata = execute_data->prev_execute_data;
 
 	function_stack_entry *fse;
 
@@ -733,7 +730,7 @@ static void xdebug_execute_user_code_begin(zend_execute_data *execute_data)
 		EX(opline) = EX(func)->op_array.opcodes;
 	}
 
-	if (XG_BASE(in_execution) && XDEBUG_VECTOR_COUNT(XG_BASE(stack)) == 0) {
+	if (XG_BASE(in_execution) && XDEBUG_VECTOR_COUNT(XG_BASE(stack)) == 0 && ((EG(flags) & EG_FLAGS_IN_SHUTDOWN) == 0)) {
 		if (XDEBUG_MODE_IS(XDEBUG_MODE_STEP_DEBUG)) {
 			xdebug_debugger_set_program_name(op_array->filename);
 			xdebug_debug_init_if_requested_at_startup();
@@ -756,7 +753,7 @@ static void xdebug_execute_user_code_begin(zend_execute_data *execute_data)
 		zend_throw_exception_ex(zend_ce_error, 0, "Xdebug has detected a possible infinite loop, and aborted your script with a stack depth of '" ZEND_LONG_FMT "' frames", XINI_BASE(max_nesting_level));
 	}
 
-	fse = xdebug_add_stack_frame(edata, op_array, XDEBUG_USER_DEFINED);
+	fse = xdebug_add_stack_frame(execute_data, op_array, XDEBUG_USER_DEFINED);
 	fse->function.internal = 0;
 
 	/* A hack to make __call work with profiles. The function *is* user defined after all. */
@@ -775,9 +772,9 @@ static void xdebug_execute_user_code_begin(zend_execute_data *execute_data)
 		xdebug_tracing_execute_ex(fse);
 	}
 
-	fse->execute_data = EG(current_execute_data)->prev_execute_data;
-	if (ZEND_CALL_INFO(EG(current_execute_data)) & ZEND_CALL_HAS_SYMBOL_TABLE) {
-		fse->symbol_table = EG(current_execute_data)->symbol_table;
+	fse->execute_data = execute_data->prev_execute_data;
+	if (ZEND_CALL_INFO(execute_data) & ZEND_CALL_HAS_SYMBOL_TABLE) {
+		fse->symbol_table = execute_data->symbol_table;
 	}
 
 	if (XDEBUG_MODE_IS(XDEBUG_MODE_COVERAGE)) {
@@ -932,16 +929,15 @@ static bool should_run_internal_handler(zend_execute_data *execute_data)
 }
 
 
-static void xdebug_execute_internal_begin(zend_execute_data *current_execute_data)
+static void xdebug_execute_internal_begin(zend_execute_data *execute_data)
 {
-	zend_execute_data    *edata = EG(current_execute_data);
 	function_stack_entry *fse;
 
 	if (XDEBUG_MODE_IS(XDEBUG_MODE_DEVELOP) && (signed long) XDEBUG_VECTOR_COUNT(XG_BASE(stack)) >= XINI_BASE(max_nesting_level) && (XINI_BASE(max_nesting_level) != -1)) {
 		zend_throw_exception_ex(zend_ce_error, 0, "Xdebug has detected a possible infinite loop, and aborted your script with a stack depth of '" ZEND_LONG_FMT "' frames", XINI_BASE(max_nesting_level));
 	}
 
-	fse = xdebug_add_stack_frame(edata, &edata->func->op_array, XDEBUG_BUILT_IN);
+	fse = xdebug_add_stack_frame(execute_data, &execute_data->func->op_array, XDEBUG_BUILT_IN);
 	fse->function.internal = 1;
 
 	if (XDEBUG_MODE_IS(XDEBUG_MODE_DEVELOP)) {
@@ -951,9 +947,9 @@ static void xdebug_execute_internal_begin(zend_execute_data *current_execute_dat
 		fse->function_call_traced = xdebug_tracing_execute_internal(fse);
 	}
 
-	fse->execute_data = EG(current_execute_data)->prev_execute_data;
-	if (ZEND_CALL_INFO(EG(current_execute_data)) & ZEND_CALL_HAS_SYMBOL_TABLE) {
-		fse->symbol_table = EG(current_execute_data)->symbol_table;
+	fse->execute_data = execute_data->prev_execute_data;
+	if (ZEND_CALL_INFO(execute_data) & ZEND_CALL_HAS_SYMBOL_TABLE) {
+		fse->symbol_table = execute_data->symbol_table;
 	}
 
 	if (XDEBUG_MODE_IS(XDEBUG_MODE_STEP_DEBUG)) {
@@ -962,7 +958,7 @@ static void xdebug_execute_internal_begin(zend_execute_data *current_execute_dat
 	}
 
 	/* Check for SOAP */
-	if (check_soap_call(fse, current_execute_data)) {
+	if (check_soap_call(fse, execute_data)) {
 		fse->soap_error_cb = zend_error_cb;
 		xdebug_base_use_original_error_cb();
 	}
@@ -972,7 +968,7 @@ static void xdebug_execute_internal_begin(zend_execute_data *current_execute_dat
 	}
 }
 
-static void xdebug_execute_internal_end(zend_execute_data *current_execute_data, zval *return_value)
+static void xdebug_execute_internal_end(zend_execute_data *execute_data, zval *return_value)
 {
 	function_stack_entry *fse;
 
@@ -1007,22 +1003,22 @@ static void xdebug_execute_internal_end(zend_execute_data *current_execute_data,
 }
 
 #if PHP_VERSION_ID < 80200
-static void xdebug_execute_internal(zend_execute_data *current_execute_data, zval *return_value)
+static void xdebug_execute_internal(zend_execute_data *execute_data, zval *return_value)
 {
-	bool run_internal_handler = should_run_internal_handler(current_execute_data);
+	bool run_internal_handler = should_run_internal_handler(execute_data);
 
 	if (run_internal_handler) {
-		xdebug_execute_internal_begin(current_execute_data);
+		xdebug_execute_internal_begin(execute_data);
 	}
 
 	if (xdebug_old_execute_internal) {
-		xdebug_old_execute_internal(current_execute_data, return_value);
+		xdebug_old_execute_internal(execute_data, return_value);
 	} else {
-		execute_internal(current_execute_data, return_value);
+		execute_internal(execute_data, return_value);
 	}
 
 	if (run_internal_handler) {
-		xdebug_execute_internal_end(current_execute_data, return_value);
+		xdebug_execute_internal_end(execute_data, return_value);
 	}
 }
 #endif
@@ -1143,7 +1139,7 @@ static zend_string *create_key_for_fiber(zend_fiber_context *fiber)
 	return zend_strpprintf(0, "{fiber:%0" PRIXPTR "}", ((uintptr_t) fiber));
 }
 
-static void add_fiber_main(zend_fiber_context *fiber)
+static void add_fiber_main(zend_string *fiber_key, zend_fiber_context *fiber)
 {
 	function_stack_entry *tmp = (function_stack_entry*) xdebug_vector_push(XG_BASE(stack));
 
@@ -1152,7 +1148,7 @@ static void add_fiber_main(zend_fiber_context *fiber)
 	tmp->function.type = XFUNC_FIBER;
 	tmp->function.object_class = NULL;
 	tmp->function.scope_class = NULL;
-	tmp->function.function = create_key_for_fiber(fiber);
+	tmp->function.function = zend_string_copy(fiber_key);
 	tmp->filename = zend_string_copy(zend_get_executed_filename_ex());
 	tmp->lineno = zend_get_executed_lineno();
 
@@ -1163,36 +1159,26 @@ static void add_fiber_main(zend_fiber_context *fiber)
 	tmp->nanotime = xdebug_get_nanotime();
 }
 
-static xdebug_vector* create_stack_for_fiber(zend_fiber_context *fiber)
+static xdebug_vector* create_stack_for_fiber(zend_string *fiber_key, zend_fiber_context *fiber)
 {
 	xdebug_vector             *tmp_stack = xdebug_vector_alloc(sizeof(function_stack_entry), function_stack_entry_dtor);
-	zend_string               *key       = create_key_for_fiber(fiber);
 	struct xdebug_fiber_entry *entry     = xdebug_fiber_entry_ctor(tmp_stack);
 
-	xdebug_hash_add(XG_BASE(fiber_stacks), ZSTR_VAL(key), ZSTR_LEN(key), entry);
-
-	zend_string_release(key);
+	xdebug_hash_add(XG_BASE(fiber_stacks), ZSTR_VAL(fiber_key), ZSTR_LEN(fiber_key), entry);
 
 	return tmp_stack;
 }
 
-static void remove_stack_for_fiber(zend_fiber_context *fiber)
+static void remove_stack_for_fiber(zend_string *fiber_key, zend_fiber_context *fiber)
 {
-	zend_string *key = create_key_for_fiber(fiber);
-
-	xdebug_hash_delete(XG_BASE(fiber_stacks), ZSTR_VAL(key), ZSTR_LEN(key));
-
-	zend_string_release(key);
+	xdebug_hash_delete(XG_BASE(fiber_stacks), ZSTR_VAL(fiber_key), ZSTR_LEN(fiber_key));
 }
 
-static xdebug_vector *find_stack_for_fiber(zend_fiber_context *fiber)
+static xdebug_vector *find_stack_for_fiber(zend_string *fiber_key, zend_fiber_context *fiber)
 {
 	struct xdebug_fiber_entry *entry = NULL;
-	zend_string               *key = create_key_for_fiber(fiber);
 
-	xdebug_hash_find(XG_BASE(fiber_stacks), ZSTR_VAL(key), ZSTR_LEN(key), (void*) &entry);
-
-	zend_string_release(key);
+	xdebug_hash_find(XG_BASE(fiber_stacks), ZSTR_VAL(fiber_key), ZSTR_LEN(fiber_key), (void*) &entry);
 
 	return entry->stack;
 }
@@ -1200,24 +1186,31 @@ static xdebug_vector *find_stack_for_fiber(zend_fiber_context *fiber)
 static void xdebug_fiber_switch_observer(zend_fiber_context *from, zend_fiber_context *to)
 {
 	xdebug_vector *current_stack;
+	zend_string   *to_key = create_key_for_fiber(to);
 
 	if (from->status == ZEND_FIBER_STATUS_DEAD) {
-		if (XG_DBG(context).next_stack == find_stack_for_fiber(from)) {
+		zend_string *from_key = create_key_for_fiber(from);
+
+		if (XG_DBG(context).next_stack == find_stack_for_fiber(from_key, from)) {
 			XG_DBG(context).next_stack = NULL;
 		}
 
-		remove_stack_for_fiber(from);
+		remove_stack_for_fiber(from_key, from);
+
+		zend_string_release(from_key);
 	}
 	if (to->status == ZEND_FIBER_STATUS_INIT) {
-		current_stack = create_stack_for_fiber(to);
+		current_stack = create_stack_for_fiber(to_key, to);
 	} else {
-		current_stack = find_stack_for_fiber(to);
+		current_stack = find_stack_for_fiber(to_key, to);
 	}
 	XG_BASE(stack) = current_stack;
 
 	if (to->status == ZEND_FIBER_STATUS_INIT) {
-		add_fiber_main(to);
+		add_fiber_main(to_key, to);
 	}
+
+	zend_string_release(to_key);
 }
 /***************************************************************************/
 #endif
@@ -1327,10 +1320,14 @@ void xdebug_base_minit(INIT_FUNC_ARGS)
 
 #if HAVE_XDEBUG_CONTROL_SOCKET_SUPPORT
 	XG_BASE(control_socket_path) = NULL;
+# ifdef __linux__
 	XG_BASE(control_socket_fd) = 0;
 	XG_BASE(control_socket_last_trigger) = 0;
+# elif WIN32
+	XG_BASE(control_socket_h) = 0;
+	XG_BASE(control_socket_last_trigger) = 0;
+# endif
 #endif
-
 	xdebug_base_overloaded_functions_setup();
 }
 
@@ -1369,8 +1366,14 @@ void xdebug_base_rinit()
 	}
 
 #if PHP_VERSION_ID >= 80100
-	XG_BASE(fiber_stacks) = xdebug_hash_alloc(64, (xdebug_hash_dtor_t) xdebug_fiber_entry_dtor);
-	XG_BASE(stack) = create_stack_for_fiber(EG(main_fiber_context));
+	{
+		zend_string *fiber_key = create_key_for_fiber(EG(main_fiber_context));
+
+		XG_BASE(fiber_stacks) = xdebug_hash_alloc(64, (xdebug_hash_dtor_t) xdebug_fiber_entry_dtor);
+		XG_BASE(stack) = create_stack_for_fiber(fiber_key, EG(main_fiber_context));
+
+		zend_string_release(fiber_key);
+	}
 #else
 	XG_BASE(stack) = xdebug_vector_alloc(sizeof(function_stack_entry), function_stack_entry_dtor);
 #endif
@@ -1402,7 +1405,9 @@ void xdebug_base_rinit()
 		}
 	}
 # endif
+#endif
 
+#if HAVE_XDEBUG_CONTROL_SOCKET_SUPPORT
 	if (XINI_BASE(control_socket_granularity) != XDEBUG_CONTROL_SOCKET_OFF) {
 		xdebug_control_socket_setup();
 	}

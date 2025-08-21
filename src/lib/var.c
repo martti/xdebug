@@ -106,6 +106,9 @@ HashTable *xdebug_objdebug_pp(zval **zval_pp, int flags)
 		EG(exception) = NULL;
 
 		tmp = zend_get_properties_for(&dzval, ZEND_PROP_PURPOSE_DEBUG);
+		if (EG(exception)) {
+			zend_clear_exception();
+		}
 
 		XG_BASE(in_debug_info) = 0;
 		xdebug_tracing_restore_trace_context(original_trace_context);
@@ -423,6 +426,16 @@ static void fetch_zval_from_symbol_table(
 				goto cleanup;
 			}
 
+			/* Return special exception value if set and enabled */
+			if (
+				XG_DBG(context).virtual_exception_value &&
+				EG(exception) &&
+				(strncmp(name, XDEBUG_EXCEPTION_VALUE_VAR_NAME, name_length) == 0)
+			) {
+				ZVAL_OBJ_COPY(&tmp_retval, EG(exception));
+				goto cleanup;
+			}
+
 			/* Check for compiled vars */
 			element = prepare_search_key(name, &element_length, "", 0);
 			if (xdebug_lib_has_active_data() && xdebug_lib_has_active_function()) {
@@ -431,19 +444,21 @@ static void fetch_zval_from_symbol_table(
 				zend_op_array *opa = xdebug_lib_get_active_func_oparray();
 				zval **CV;
 
-				while (opa->vars && i < opa->last_var) {
-					if (ZSTR_H(opa->vars[i]) == hash_value &&
-						ZSTR_LEN(opa->vars[i]) == element_length &&
-						strncmp(STR_NAME_VAL(opa->vars[i]), element, element_length) == 0)
-					{
-						zval *CV_z = ZEND_CALL_VAR_NUM(xdebug_lib_get_active_data(), i);
-						CV = &CV_z;
-						if (CV) {
-							ZVAL_COPY(&tmp_retval, *CV);
-							goto cleanup;
+				if (ZEND_USER_CODE(opa->type)) {
+					while (opa->vars && i < opa->last_var) {
+						if (ZSTR_H(opa->vars[i]) == hash_value &&
+							ZSTR_LEN(opa->vars[i]) == element_length &&
+							strncmp(STR_NAME_VAL(opa->vars[i]), element, element_length) == 0)
+						{
+							zval *CV_z = ZEND_CALL_VAR_NUM(xdebug_lib_get_active_data(), i);
+							CV = &CV_z;
+							if (CV) {
+								ZVAL_COPY(&tmp_retval, *CV);
+								goto cleanup;
+							}
 						}
+						i++;
 					}
-					i++;
 				}
 			}
 			free(element);
@@ -460,7 +475,7 @@ static void fetch_zval_from_symbol_table(
 				if (xdebug_lib_has_active_object()) {
 					ZVAL_COPY(&tmp_retval, xdebug_lib_get_active_object());
 				} else {
-					ZVAL_NULL(&tmp_retval);
+					ZVAL_UNDEF(&tmp_retval);
 				}
 				goto cleanup;
 			}
@@ -493,40 +508,44 @@ static void fetch_zval_from_symbol_table(
 			XDEBUG_BREAK_INTENTIONALLY_MISSING
 
 		case XF_ST_OBJ_PROPERTY:
-			/* Let's see if there is a debug handler */
-			if (value_in && Z_TYPE_P(value_in) == IS_OBJECT) {
-				myht = xdebug_objdebug_pp(&value_in, XDEBUG_VAR_OBJDEBUG_DEFAULT);
+			/* If we don't have an object, bail out */
+			if (!value_in || Z_TYPE_P(value_in) != IS_OBJECT) {
+				ZVAL_UNDEF(&tmp_retval);
+				goto cleanup;
+			}
 
-				if (myht) {
-					/* As a normal (public) property */
-					zval *tmp = zend_symtable_str_find(myht, name, name_length);
-					if (tmp != NULL) {
+			/* Let's see if there is a debug handler */
+			myht = xdebug_objdebug_pp(&value_in, XDEBUG_VAR_OBJDEBUG_DEFAULT);
+
+			if (myht) {
+				/* As a normal (public) property */
+				zval *tmp = zend_symtable_str_find(myht, name, name_length);
+				if (tmp != NULL) {
 #if PHP_VERSION_ID >= 80400
-						if (Z_TYPE_P(tmp) == IS_PTR) {
-							zend_release_properties(myht);
-							goto skip_for_property_hook;
-						}
+					if (Z_TYPE_P(tmp) == IS_PTR) {
+						zend_release_properties(myht);
+						goto skip_for_property_hook;
+					}
 #endif
+					ZVAL_COPY(&tmp_retval, tmp);
+					zend_release_properties(myht);
+					goto cleanup;
+				}
+
+				/* As a private property */
+				{
+					char *unmangled = replace_star_by_null(name, name_length);
+					zval *tmp = zend_symtable_str_find(myht, unmangled, name_length);
+					if (tmp != NULL) {
 						ZVAL_COPY(&tmp_retval, tmp);
 						zend_release_properties(myht);
+						xdfree(unmangled);
 						goto cleanup;
 					}
-
-					/* As a private property */
-					{
-						char *unmangled = replace_star_by_null(name, name_length);
-						zval *tmp = zend_symtable_str_find(myht, unmangled, name_length);
-						if (tmp != NULL) {
-							ZVAL_COPY(&tmp_retval, tmp);
-							zend_release_properties(myht);
-							xdfree(unmangled);
-							goto cleanup;
-						}
-						xdfree(unmangled);
-					}
-
-					zend_release_properties(myht);
+					xdfree(unmangled);
 				}
+
+				zend_release_properties(myht);
 			}
 
 #if PHP_VERSION_ID >= 80400
@@ -971,7 +990,7 @@ xdebug_var_export_options* xdebug_var_export_options_from_ini(void)
 		options->max_depth = 0;
 	}
 
-	options->runtime = (xdebug_var_runtime_page*) xdmalloc((options->max_depth + 1) * sizeof(xdebug_var_runtime_page));
+	options->runtime = (xdebug_var_runtime_page*) xdcalloc((options->max_depth + 1), sizeof(xdebug_var_runtime_page));
 	options->no_decoration = 0;
 
 	return options;
@@ -1028,6 +1047,7 @@ static const char xml_encode_count[256] = {
 	1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1,
 	1, 1, 6, 1,  1, 1, 5, 5,  1, 1, 1, 1,  1, 1, 1, 1,
 	1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1,  4, 1, 4, 1,
+	1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1,
 	1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1,
 	1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1,
 	1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1,
